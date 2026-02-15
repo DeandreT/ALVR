@@ -43,6 +43,7 @@ public:
 
     bool CopyToStaging(
         ID3D11Texture2D* pTexture[][2],
+        ID3D11Texture2D* pDepthTexture[2],
         vr::VRTextureBounds_t bounds[][2],
         vr::HmdMatrix34_t poses[],
         int layerCount,

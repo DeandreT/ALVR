@@ -48,8 +48,12 @@ pub struct StatisticsManager {
     last_frame_present_interval: Duration,
     video_packets_total: usize,
     video_packets_partial_sum: usize,
+    depth_packets_total: usize,
+    depth_packets_partial_sum: usize,
     video_bytes_total: usize,
     video_bytes_partial_sum: usize,
+    asynchronous_space_warp_enabled: bool,
+    depth_based_frame_synthesis_enabled: bool,
     battery_gauges: HashMap<u64, BatteryData>,
     steamvr_pipeline_latency: Duration,
     motion_to_photon_latency_average: SlidingWindowAverage<Duration>,
@@ -64,6 +68,8 @@ impl StatisticsManager {
         max_history_size: usize,
         nominal_server_frame_interval: Duration,
         steamvr_pipeline_frames: f32,
+        asynchronous_space_warp_enabled: bool,
+        depth_based_frame_synthesis_enabled: bool,
     ) -> Self {
         Self {
             history_buffer: VecDeque::new(),
@@ -73,8 +79,12 @@ impl StatisticsManager {
             last_frame_present_interval: Duration::ZERO,
             video_packets_total: 0,
             video_packets_partial_sum: 0,
+            depth_packets_total: 0,
+            depth_packets_partial_sum: 0,
             video_bytes_total: 0,
             video_bytes_partial_sum: 0,
+            asynchronous_space_warp_enabled,
+            depth_based_frame_synthesis_enabled,
             battery_gauges: HashMap::new(),
             steamvr_pipeline_latency: Duration::from_secs_f32(
                 steamvr_pipeline_frames * nominal_server_frame_interval.as_secs_f32(),
@@ -168,6 +178,11 @@ impl StatisticsManager {
         };
     }
 
+    pub fn report_depth_frame_sent(&mut self) {
+        self.depth_packets_total += 1;
+        self.depth_packets_partial_sum += 1;
+    }
+
     pub fn report_throughput_stats(&mut self, stats: BitrateDirectives) {
         self.last_throughput_directives = stats;
     }
@@ -227,6 +242,9 @@ impl StatisticsManager {
                     video_packets_total: self.video_packets_total,
                     video_packets_per_sec: (self.video_packets_partial_sum as f32 / interval_secs)
                         as _,
+                    depth_packets_total: self.depth_packets_total,
+                    depth_packets_per_sec: (self.depth_packets_partial_sum as f32 / interval_secs)
+                        as _,
                     video_mbytes_total: (self.video_bytes_total as f32 / 1e6) as usize,
                     video_mbits_per_sec: self.video_bytes_partial_sum as f32 * 8.
                         / 1e6
@@ -237,6 +255,9 @@ impl StatisticsManager {
                     decode_latency_ms: client_stats.video_decode.as_secs_f32() * 1000.,
                     client_fps: client_fps as _,
                     server_fps: server_fps as _,
+                    asynchronous_space_warp_enabled: self.asynchronous_space_warp_enabled,
+                    depth_based_frame_synthesis_enabled: self
+                        .depth_based_frame_synthesis_enabled,
                     battery_hmd: (self
                         .battery_gauges
                         .get(&HEAD_ID)
@@ -254,6 +275,7 @@ impl StatisticsManager {
 
                 self.video_packets_partial_sum = 0;
                 self.video_bytes_partial_sum = 0;
+                self.depth_packets_partial_sum = 0;
             }
 
             let packet_bits = frame.video_packet_bytes as f32 * 8.0;

@@ -270,6 +270,7 @@ void OvrDirectModeComponent::CopyTexture(uint32_t layerCount) {
     uint64_t presentationTime = GetTimestampUs();
 
     ID3D11Texture2D* pTexture[MAX_LAYERS][2];
+    ID3D11Texture2D* pDepthTexture[2] = { nullptr, nullptr };
     ComPtr<ID3D11Texture2D> Texture[MAX_LAYERS][2];
     vr::VRTextureBounds_t bounds[MAX_LAYERS][2];
     vr::HmdMatrix34_t poses[MAX_LAYERS];
@@ -315,6 +316,17 @@ void OvrDirectModeComponent::CopyTexture(uint32_t layerCount) {
         bounds[i][0] = m_submitLayers[i][0].bounds;
         bounds[i][1] = m_submitLayers[i][1].bounds;
         poses[i] = m_submitLayers[i][0].mHmdPose;
+
+        if (pDepthTexture[0] == nullptr && pDepthTexture[1] == nullptr
+            && m_submitLayers[i][0].hDepthTexture != 0 && m_submitLayers[i][1].hDepthTexture != 0) {
+            auto leftDepthIt = m_handleMap.find((HANDLE)m_submitLayers[i][0].hDepthTexture);
+            auto rightDepthIt = m_handleMap.find((HANDLE)m_submitLayers[i][1].hDepthTexture);
+            if (leftDepthIt != m_handleMap.end() && rightDepthIt != m_handleMap.end()) {
+                pDepthTexture[0] = leftDepthIt->second.first->textures[leftDepthIt->second.second].Get();
+                pDepthTexture[1]
+                    = rightDepthIt->second.first->textures[rightDepthIt->second.second].Get();
+            }
+        }
     }
 
     // This can go away, but is useful to see it as a separate packet on the gpu in traces.
@@ -332,6 +344,7 @@ void OvrDirectModeComponent::CopyTexture(uint32_t layerCount) {
         // Copy entire texture to staging so we can read the pixels to send to remote device.
         m_pEncoder->CopyToStaging(
             pTexture,
+            pDepthTexture,
             bounds,
             poses,
             layerCount,

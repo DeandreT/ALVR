@@ -60,4 +60,23 @@ VKAPI_ATTR VkResult VKAPI_CALL wsi_layer_vkCreateDisplayModeKHR(
     const VkDisplayModeCreateInfoKHR*           pCreateInfo,
     const VkAllocationCallbacks*                pAllocator,
     VkDisplayModeKHR*                           pMode);
+
+VKAPI_ATTR VkResult VKAPI_CALL wsi_layer_vkCreateImageView(
+    VkDevice device,
+    const VkImageViewCreateInfo *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator,
+    VkImageView *pView
+);
+
+VKAPI_ATTR void VKAPI_CALL wsi_layer_vkDestroyImageView(
+    VkDevice device, VkImageView imageView, const VkAllocationCallbacks *pAllocator
+);
+
+VKAPI_ATTR void VKAPI_CALL wsi_layer_vkCmdBeginRendering(
+    VkCommandBuffer commandBuffer, const VkRenderingInfo *pRenderingInfo
+);
+
+VKAPI_ATTR void VKAPI_CALL wsi_layer_vkCmdBeginRenderingKHR(
+    VkCommandBuffer commandBuffer, const VkRenderingInfo *pRenderingInfo
+);
 }

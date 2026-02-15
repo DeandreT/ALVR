@@ -40,7 +40,6 @@ override C_RIGHT_X: f32 = 0.0;
 override C_RIGHT_Y: f32 = 0.0;
 
 struct PushConstant {
-    reprojection_transform: mat4x4f,
     view_idx: u32,
     passthrough_mode: u32, // 0: Blend, 1: RGB chroma key, 2: HSV chroma key
     blend_alpha: f32,
@@ -51,8 +50,22 @@ struct PushConstant {
 }
 var<push_constant> pc: PushConstant;
 
+struct ReprojectionData {
+    reprojection_transform: mat4x4f,
+    input_from_output: mat4x4f,
+    output_proj_inverse: mat4x4f,
+    input_proj: mat4x4f,
+    flags: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+}
+
 @group(0) @binding(0) var stream_texture: texture_2d<f32>;
 @group(0) @binding(1) var stream_sampler: sampler;
+@group(0) @binding(2) var<uniform> reproj: ReprojectionData;
+@group(0) @binding(3) var depth_texture: texture_2d<f32>;
+@group(0) @binding(4) var depth_sampler: sampler;
 
 struct VertexOutput {
     @builtin(position) position: vec4f,
@@ -64,9 +77,31 @@ fn vertex_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     var result: VertexOutput;
 
     result.uv = vec2f(f32(vertex_index & 1), f32(vertex_index >> 1));
-    result.position = pc.reprojection_transform * vec4f(result.uv.x - 0.5, 0.5 - result.uv.y, 0.0, 1.0);
+    result.position = reproj.reprojection_transform * vec4f(result.uv.x - 0.5, 0.5 - result.uv.y, 0.0, 1.0);
 
     return result;
+}
+
+fn depth_reproject_uv(output_uv: vec2f) -> vec2f {
+    let depth = textureSample(depth_texture, depth_sampler, output_uv).r;
+    if depth <= 0.00001 {
+        return output_uv;
+    }
+
+    let ndc = vec4f(output_uv.x * 2.0 - 1.0, 1.0 - output_uv.y * 2.0, 1.0, 1.0);
+    let out_view_point = reproj.output_proj_inverse * ndc;
+    let out_dir = normalize((out_view_point.xyz / out_view_point.w));
+    let z = max(-out_dir.z, 0.00001);
+    let point_out = out_dir * (depth / z);
+    let point_in = reproj.input_from_output * vec4f(point_out, 1.0);
+    let clip_in = reproj.input_proj * point_in;
+
+    if abs(clip_in.w) <= 0.00001 {
+        return output_uv;
+    }
+
+    let ndc_in = clip_in.xy / clip_in.w;
+    return vec2f(ndc_in.x * 0.5 + 0.5, 0.5 - ndc_in.y * 0.5);
 }
 
 @fragment
@@ -123,6 +158,10 @@ fn fragment_main(@location(0) uv: vec2f) -> @location(0) vec4f {
         if pc.view_idx == 1 {
             corrected_uv.x = 1.0 - corrected_uv.x;
         }
+    }
+
+    if (reproj.flags & 1u) != 0u {
+        corrected_uv = depth_reproject_uv(corrected_uv);
     }
 
     var color: vec3f;

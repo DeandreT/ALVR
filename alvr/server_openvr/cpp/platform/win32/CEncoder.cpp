@@ -100,6 +100,7 @@ void CEncoder::SetViewParams(
 
 bool CEncoder::CopyToStaging(
     ID3D11Texture2D* pTexture[][2],
+    ID3D11Texture2D* pDepthTexture[2],
     vr::VRTextureBounds_t bounds[][2],
     vr::HmdMatrix34_t poses[],
     int layerCount,
@@ -116,6 +117,7 @@ bool CEncoder::CopyToStaging(
     m_FrameRender->RenderFrame(
         pTexture, bounds, poses, layerCount, recentering, message, debugText
     );
+    m_FrameRender->SendDepth(pDepthTexture, targetTimestampNs);
     return true;
 }
 

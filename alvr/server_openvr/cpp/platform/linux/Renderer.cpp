@@ -1,8 +1,10 @@
 #include "Renderer.h"
+#include "alvr_server/bindings.h"
 
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <cmath>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -48,6 +50,87 @@ static bool filter_modifier(uint64_t modifier) {
         }
     }
     return true;
+}
+
+static uint16_t float_to_half(float value) {
+    uint32_t bits;
+    memcpy(&bits, &value, sizeof(bits));
+
+    const uint32_t sign = (bits >> 16) & 0x8000;
+    int32_t exponent = int32_t((bits >> 23) & 0xff) - 127 + 15;
+    uint32_t mantissa = bits & 0x7fffff;
+
+    if (exponent <= 0) {
+        if (exponent < -10) {
+            return uint16_t(sign);
+        }
+        mantissa = (mantissa | 0x800000) >> (1 - exponent);
+        return uint16_t(sign | ((mantissa + 0x1000) >> 13));
+    }
+    if (exponent >= 31) {
+        return uint16_t(sign | 0x7c00);
+    }
+
+    return uint16_t(sign | (uint32_t(exponent) << 10) | ((mantissa + 0x1000) >> 13));
+}
+
+static bool is_depth_format(VkFormat format) {
+    switch (format) {
+    case VK_FORMAT_D16_UNORM:
+    case VK_FORMAT_X8_D24_UNORM_PACK32:
+    case VK_FORMAT_D24_UNORM_S8_UINT:
+    case VK_FORMAT_D32_SFLOAT:
+    case VK_FORMAT_D32_SFLOAT_S8_UINT:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static size_t depth_pixel_size(VkFormat format) {
+    switch (format) {
+    case VK_FORMAT_R8G8B8A8_UNORM:
+    case VK_FORMAT_B8G8R8A8_UNORM:
+        return 4;
+    case VK_FORMAT_D16_UNORM:
+        return 2;
+    case VK_FORMAT_X8_D24_UNORM_PACK32:
+    case VK_FORMAT_D24_UNORM_S8_UINT:
+    case VK_FORMAT_D32_SFLOAT:
+    case VK_FORMAT_D32_SFLOAT_S8_UINT:
+        return 4;
+    default:
+        return 0;
+    }
+}
+
+static float depth_sample_to_float(VkFormat format, const uint8_t* data) {
+    switch (format) {
+    case VK_FORMAT_R8G8B8A8_UNORM: {
+        const float r = data[0] / 255.0f;
+        const float g = data[1] / 255.0f;
+        const float b = data[2] / 255.0f;
+        return 0.2126f * r + 0.7152f * g + 0.0722f * b;
+    }
+    case VK_FORMAT_B8G8R8A8_UNORM: {
+        const float b = data[0] / 255.0f;
+        const float g = data[1] / 255.0f;
+        const float r = data[2] / 255.0f;
+        return 0.2126f * r + 0.7152f * g + 0.0722f * b;
+    }
+    case VK_FORMAT_D16_UNORM:
+        return float(*reinterpret_cast<const uint16_t*>(data)) / 65535.0f;
+    case VK_FORMAT_X8_D24_UNORM_PACK32:
+    case VK_FORMAT_D24_UNORM_S8_UINT: {
+        uint32_t packed = *reinterpret_cast<const uint32_t*>(data);
+        return float(packed & 0x00ffffff) / 16777215.0f;
+    }
+    case VK_FORMAT_D32_SFLOAT:
+    case VK_FORMAT_D32_SFLOAT_S8_UINT:
+        return *reinterpret_cast<const float*>(data);
+    default:
+        return 1.0f;
+    }
 }
 
 Renderer::Renderer(
@@ -101,6 +184,17 @@ Renderer::~Renderer() {
         vkFreeMemory(m_dev, image.memory, nullptr);
         vkDestroySemaphore(m_dev, image.semaphore, nullptr);
     }
+    for (const InputImage& image : m_depthImages) {
+        vkDestroyImageView(m_dev, image.view, nullptr);
+        vkDestroyImage(m_dev, image.image, nullptr);
+        vkFreeMemory(m_dev, image.memory, nullptr);
+        vkDestroySemaphore(m_dev, image.semaphore, nullptr);
+    }
+    if (m_depthReadback.mapped) {
+        vkUnmapMemory(m_dev, m_depthReadback.memory);
+    }
+    vkDestroyBuffer(m_dev, m_depthReadback.buffer, nullptr);
+    vkFreeMemory(m_dev, m_depthReadback.memory, nullptr);
 
     for (const StagingImage& image : m_stagingImages) {
         vkDestroyImageView(m_dev, image.view, nullptr);
@@ -258,7 +352,78 @@ void Renderer::AddImage(
     VkImageView view;
     VK_CHECK(vkCreateImageView(m_dev, &viewInfo, nullptr, &view));
 
-    m_images.push_back({ image, VK_IMAGE_LAYOUT_UNDEFINED, mem, semaphore, view });
+    m_images.push_back({ image, VK_IMAGE_LAYOUT_UNDEFINED, mem, semaphore, view, imageInfo.format });
+}
+
+void Renderer::AddDepthImage(
+    VkImageCreateInfo imageInfo, size_t memoryIndex, int imageFd, int semaphoreFd
+) {
+    VkExternalMemoryImageCreateInfo extMemImageInfo = {};
+    extMemImageInfo.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
+    extMemImageInfo.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+    imageInfo.pNext = &extMemImageInfo;
+    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VkImage image;
+    VK_CHECK(vkCreateImage(m_dev, &imageInfo, nullptr, &image));
+
+    VkMemoryRequirements req;
+    vkGetImageMemoryRequirements(m_dev, image, &req);
+
+    VkMemoryDedicatedAllocateInfo dedicatedMemInfo = {};
+    dedicatedMemInfo.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO;
+    dedicatedMemInfo.image = image;
+
+    VkImportMemoryFdInfoKHR importMemInfo = {};
+    importMemInfo.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR;
+    importMemInfo.pNext = &dedicatedMemInfo;
+    importMemInfo.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+    importMemInfo.fd = imageFd;
+
+    VkMemoryAllocateInfo memAllocInfo = {};
+    memAllocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    memAllocInfo.pNext = &importMemInfo;
+    memAllocInfo.allocationSize = req.size;
+    memAllocInfo.memoryTypeIndex = memoryIndex;
+
+    VkDeviceMemory mem;
+    VK_CHECK(vkAllocateMemory(m_dev, &memAllocInfo, nullptr, &mem));
+    VK_CHECK(vkBindImageMemory(m_dev, image, mem, 0));
+
+    VkSemaphoreTypeCreateInfo timelineInfo = {};
+    timelineInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+    timelineInfo.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+
+    VkSemaphoreCreateInfo semInfo = {};
+    semInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    semInfo.pNext = &timelineInfo;
+    VkSemaphore semaphore;
+    VK_CHECK(vkCreateSemaphore(m_dev, &semInfo, nullptr, &semaphore));
+
+    VkImportSemaphoreFdInfoKHR impSemInfo = {};
+    impSemInfo.sType = VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR;
+    impSemInfo.semaphore = semaphore;
+    impSemInfo.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
+    impSemInfo.fd = semaphoreFd;
+    VK_CHECK(d.vkImportSemaphoreFdKHR(m_dev, &impSemInfo));
+
+    VkImageViewCreateInfo viewInfo = {};
+    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    viewInfo.format = imageInfo.format;
+    viewInfo.image = image;
+    viewInfo.subresourceRange = {};
+    viewInfo.subresourceRange.aspectMask
+        = is_depth_format(imageInfo.format) ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+    viewInfo.subresourceRange.baseMipLevel = 0;
+    viewInfo.subresourceRange.levelCount = 1;
+    viewInfo.subresourceRange.baseArrayLayer = 0;
+    viewInfo.subresourceRange.layerCount = 1;
+    VkImageView view;
+    VK_CHECK(vkCreateImageView(m_dev, &viewInfo, nullptr, &view));
+
+    m_depthImages.push_back(
+        { image, VK_IMAGE_LAYOUT_UNDEFINED, mem, semaphore, view, imageInfo.format }
+    );
 }
 
 void Renderer::AddPipeline(RenderPipeline* pipeline) {
@@ -686,6 +851,170 @@ void Renderer::Render(uint32_t index, uint64_t waitValue) {
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &m_commandBuffer;
     VK_CHECK(vkQueueSubmit(m_queue, 1, &submitInfo, nullptr));
+}
+
+void Renderer::SendDepth(uint32_t index, uint64_t waitValue, uint64_t targetTimestampNs) {
+    if (DepthSend == nullptr || index >= m_depthImages.size()) {
+        return;
+    }
+
+    auto& depth = m_depthImages[index];
+    const uint32_t width = m_imageSize.width;
+    const uint32_t height = m_imageSize.height;
+    if (width < 2 || height == 0) {
+        return;
+    }
+
+    const size_t pixel_size = depth_pixel_size(depth.format);
+    if (pixel_size == 0) {
+        return;
+    }
+
+    const size_t readback_size = size_t(width) * size_t(height) * pixel_size;
+    if (m_depthReadback.size < readback_size) {
+        if (m_depthReadback.mapped) {
+            vkUnmapMemory(m_dev, m_depthReadback.memory);
+            m_depthReadback.mapped = nullptr;
+        }
+        vkDestroyBuffer(m_dev, m_depthReadback.buffer, nullptr);
+        vkFreeMemory(m_dev, m_depthReadback.memory, nullptr);
+
+        VkBufferCreateInfo bufferInfo = {};
+        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bufferInfo.size = readback_size;
+        bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        VK_CHECK(vkCreateBuffer(m_dev, &bufferInfo, nullptr, &m_depthReadback.buffer));
+
+        VkMemoryRequirements memReqs;
+        vkGetBufferMemoryRequirements(m_dev, m_depthReadback.buffer, &memReqs);
+
+        VkMemoryAllocateInfo allocInfo = {};
+        allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocInfo.allocationSize = memReqs.size;
+        allocInfo.memoryTypeIndex = memoryTypeIndex(
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+                | VK_MEMORY_PROPERTY_HOST_CACHED_BIT,
+            memReqs.memoryTypeBits
+        );
+        VK_CHECK(vkAllocateMemory(m_dev, &allocInfo, nullptr, &m_depthReadback.memory));
+        VK_CHECK(vkBindBufferMemory(m_dev, m_depthReadback.buffer, m_depthReadback.memory, 0));
+        VK_CHECK(vkMapMemory(
+            m_dev,
+            m_depthReadback.memory,
+            0,
+            VK_WHOLE_SIZE,
+            0,
+            reinterpret_cast<void**>(&m_depthReadback.mapped)
+        ));
+        m_depthReadback.size = readback_size;
+    }
+
+    VkCommandBuffer copy_command_buffer = VK_NULL_HANDLE;
+    VkCommandBufferAllocateInfo commandBufferInfo = {};
+    commandBufferInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    commandBufferInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    commandBufferInfo.commandPool = m_commandPool;
+    commandBufferInfo.commandBufferCount = 1;
+    VK_CHECK(vkAllocateCommandBuffers(m_dev, &commandBufferInfo, &copy_command_buffer));
+
+    VkCommandBufferBeginInfo commandBufferBegin = {};
+    commandBufferBegin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    VK_CHECK(vkBeginCommandBuffer(copy_command_buffer, &commandBufferBegin));
+
+    VkImageMemoryBarrier imageBarrier = {};
+    imageBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    imageBarrier.oldLayout = depth.layout;
+    imageBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    imageBarrier.image = depth.image;
+    const VkImageAspectFlags aspect_mask
+        = is_depth_format(depth.format) ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+    imageBarrier.subresourceRange.aspectMask = aspect_mask;
+    imageBarrier.subresourceRange.layerCount = 1;
+    imageBarrier.subresourceRange.levelCount = 1;
+    imageBarrier.srcAccessMask = 0;
+    imageBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    vkCmdPipelineBarrier(
+        copy_command_buffer,
+        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0,
+        0,
+        nullptr,
+        0,
+        nullptr,
+        1,
+        &imageBarrier
+    );
+    depth.layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+
+    VkBufferImageCopy copyRegion = {};
+    copyRegion.bufferOffset = 0;
+    copyRegion.bufferRowLength = 0;
+    copyRegion.bufferImageHeight = 0;
+    copyRegion.imageSubresource.aspectMask = aspect_mask;
+    copyRegion.imageSubresource.mipLevel = 0;
+    copyRegion.imageSubresource.baseArrayLayer = 0;
+    copyRegion.imageSubresource.layerCount = 1;
+    copyRegion.imageExtent = { width, height, 1 };
+    vkCmdCopyImageToBuffer(
+        copy_command_buffer,
+        depth.image,
+        depth.layout,
+        m_depthReadback.buffer,
+        1,
+        &copyRegion
+    );
+
+    VK_CHECK(vkEndCommandBuffer(copy_command_buffer));
+
+    VkTimelineSemaphoreSubmitInfo timelineInfo = {};
+    timelineInfo.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+    timelineInfo.waitSemaphoreValueCount = 1;
+    timelineInfo.pWaitSemaphoreValues = &waitValue;
+
+    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+
+    VkSubmitInfo submitInfo = {};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.pNext = &timelineInfo;
+    submitInfo.waitSemaphoreCount = 1;
+    submitInfo.pWaitSemaphores = &depth.semaphore;
+    submitInfo.pWaitDstStageMask = &waitStage;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &copy_command_buffer;
+
+    VkFenceCreateInfo fenceInfo = {};
+    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    VkFence fence = VK_NULL_HANDLE;
+    VK_CHECK(vkCreateFence(m_dev, &fenceInfo, nullptr, &fence));
+    VK_CHECK(vkQueueSubmit(m_queue, 1, &submitInfo, fence));
+    VK_CHECK(vkWaitForFences(m_dev, 1, &fence, VK_TRUE, UINT64_MAX));
+    vkDestroyFence(m_dev, fence, nullptr);
+    vkFreeCommandBuffers(m_dev, m_commandPool, 1, &copy_command_buffer);
+
+    const uint32_t eye_width = width / 2;
+    std::vector<uint16_t> converted(size_t(eye_width) * size_t(height) * 2);
+    for (uint32_t eye = 0; eye < 2; ++eye) {
+        const uint32_t x_offset = eye * eye_width;
+        uint16_t* out = converted.data() + size_t(eye) * size_t(eye_width) * size_t(height);
+        for (uint32_t y = 0; y < height; ++y) {
+            for (uint32_t x = 0; x < eye_width; ++x) {
+                const size_t src_index = size_t(y) * size_t(width) + size_t(x_offset + x);
+                const uint8_t* src = m_depthReadback.mapped + src_index * pixel_size;
+                float depth_value = depth_sample_to_float(depth.format, src);
+                depth_value = std::max(0.0f, std::min(1.0f, depth_value));
+                out[size_t(y) * eye_width + x] = float_to_half(depth_value);
+            }
+        }
+    }
+
+    DepthSend(
+        targetTimestampNs,
+        eye_width,
+        height,
+        reinterpret_cast<const unsigned char*>(converted.data()),
+        int(converted.size() * sizeof(uint16_t))
+    );
 }
 
 void Renderer::Sync() {

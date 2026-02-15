@@ -378,6 +378,10 @@ PFN_vkVoidFunction VKAPI_CALL wsi_layer_vkGetDeviceProcAddr(VkDevice device,
     GET_PROC_ADDR(vkDestroyFence);
     GET_PROC_ADDR(vkWaitForFences);
     GET_PROC_ADDR(vkGetFenceStatus);
+    GET_PROC_ADDR(vkCreateImageView);
+    GET_PROC_ADDR(vkDestroyImageView);
+    GET_PROC_ADDR(vkCmdBeginRendering);
+    GET_PROC_ADDR(vkCmdBeginRenderingKHR);
 
     return layer::device_private_data::get(device).disp.GetDeviceProcAddr(device, funcName);
 }

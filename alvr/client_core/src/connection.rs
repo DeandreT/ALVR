@@ -1,7 +1,7 @@
 #![allow(clippy::if_same_then_else)]
 
 use crate::{
-    ClientCapabilities, ClientCoreEvent,
+    ClientCapabilities, ClientCoreEvent, DepthFrame,
     logging_backend::{LOG_CHANNEL_SENDER, LogMirrorData},
     sockets::AnnouncerSocket,
     statistics::StatisticsManager,
@@ -15,8 +15,9 @@ use alvr_common::{
 };
 use alvr_packets::{
     AUDIO, ClientConnectionResult, ClientControlPacket, ClientStatistics, ConnectionAcceptedInfo,
-    HAPTICS, Haptics, STATISTICS, ServerControlPacket, StreamConfigPacket, TRACKING, TrackingData,
-    VIDEO, VideoPacketHeader, VideoStreamingCapabilities, VideoStreamingCapabilitiesExt,
+    DEPTH, DepthPacketHeader, HAPTICS, Haptics, STATISTICS, ServerControlPacket,
+    StreamConfigPacket, TRACKING, TrackingData, VIDEO, VideoPacketHeader,
+    VideoStreamingCapabilities, VideoStreamingCapabilitiesExt,
 };
 use alvr_session::{SocketProtocol, settings_schema::Switch};
 use alvr_sockets::{
@@ -65,6 +66,7 @@ pub struct ConnectionContext {
     pub statistics_manager: Mutex<Option<StatisticsManager>>,
     pub decoder_callback: Mutex<Option<Box<DecoderCallback>>>,
     pub global_view_params_queue: Mutex<VecDeque<(Duration, [ViewParams; 2])>>,
+    pub depth_frames_queue: Mutex<VecDeque<DepthFrame>>,
     pub max_prediction: RwLock<Duration>,
 }
 
@@ -263,8 +265,12 @@ fn connection_pipeline(
 
     info!("Connected to server");
 
+    ctx.depth_frames_queue.lock().clear();
+
     let mut video_receiver =
         stream_socket.subscribe_to_stream::<VideoPacketHeader>(VIDEO, MAX_UNREAD_PACKETS);
+    let mut depth_receiver =
+        stream_socket.subscribe_to_stream::<DepthPacketHeader>(DEPTH, MAX_UNREAD_PACKETS);
     let mut game_audio_receiver = stream_socket.subscribe_to_stream(AUDIO, MAX_UNREAD_PACKETS);
     let tracking_sender = stream_socket.request_stream(TRACKING);
     let mut haptics_receiver =
@@ -357,6 +363,36 @@ fn connection_pipeline(
     } else {
         thread::spawn(|| ())
     };
+
+    let depth_receive_thread = thread::spawn({
+        let ctx = Arc::clone(&ctx);
+        move || {
+            while is_streaming(&ctx) {
+                let data = match depth_receiver.recv(STREAMING_RECV_TIMEOUT) {
+                    Ok(data) => data,
+                    Err(ConnectionError::TryAgain(_)) => continue,
+                    Err(ConnectionError::Other(_)) => return,
+                };
+                let Ok((header, payload)) = data.get() else {
+                    return;
+                };
+
+                let queue = &mut *ctx.depth_frames_queue.lock();
+                queue.push_back(crate::DepthFrame {
+                    timestamp: header.timestamp,
+                    width: header.width,
+                    height: header.height,
+                    eye_count: header.eye_count,
+                    bytes_per_pixel: header.bytes_per_pixel,
+                    payload: payload.to_vec(),
+                });
+
+                while queue.len() > 128 {
+                    queue.pop_front();
+                }
+            }
+        }
+    });
 
     let microphone_thread = if matches!(settings.audio.microphone, Switch::Enabled(_)) {
         let device = alvr_audio::new_input(None).to_con()?;
@@ -577,6 +613,7 @@ fn connection_pipeline(
 
     video_receive_thread.join().ok();
     game_audio_thread.join().ok();
+    depth_receive_thread.join().ok();
     microphone_thread.join().ok();
     haptics_receive_thread.join().ok();
     control_send_thread.join().ok();

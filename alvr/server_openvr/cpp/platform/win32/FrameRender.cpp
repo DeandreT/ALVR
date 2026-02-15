@@ -3,6 +3,9 @@
 #include "alvr_server/Settings.h"
 #include "alvr_server/Utils.h"
 #include "alvr_server/bindings.h"
+#include <algorithm>
+#include <directxpackedvector.h>
+#include <vector>
 
 extern uint64_t g_DriverTestMode;
 
@@ -891,4 +894,98 @@ void FrameRender::GetEncodingResolution(uint32_t* width, uint32_t* height) {
         *width = Settings::Instance().m_renderWidth;
         *height = Settings::Instance().m_renderHeight;
     }
+}
+
+void FrameRender::SendDepth(ID3D11Texture2D* pDepthTexture[2], uint64_t targetTimestampNs) {
+    if (DepthSend == nullptr || pDepthTexture[0] == nullptr || pDepthTexture[1] == nullptr) {
+        return;
+    }
+
+    D3D11_TEXTURE2D_DESC srcDesc = {};
+    pDepthTexture[0]->GetDesc(&srcDesc);
+    if (srcDesc.Width == 0 || srcDesc.Height == 0) {
+        return;
+    }
+
+    bool formatIsFloat32 = srcDesc.Format == DXGI_FORMAT_D32_FLOAT
+        || srcDesc.Format == DXGI_FORMAT_R32_FLOAT || srcDesc.Format == DXGI_FORMAT_R32_TYPELESS
+        || srcDesc.Format == DXGI_FORMAT_D32_FLOAT_S8X24_UINT
+        || srcDesc.Format == DXGI_FORMAT_R32G8X24_TYPELESS;
+    bool formatIsD24 = srcDesc.Format == DXGI_FORMAT_D24_UNORM_S8_UINT
+        || srcDesc.Format == DXGI_FORMAT_R24G8_TYPELESS;
+
+    if (!formatIsFloat32 && !formatIsD24) {
+        return;
+    }
+
+    std::vector<uint16_t> depthData(srcDesc.Width * srcDesc.Height * 2);
+
+    for (int eye = 0; eye < 2; eye++) {
+        D3D11_TEXTURE2D_DESC eyeDesc = {};
+        pDepthTexture[eye]->GetDesc(&eyeDesc);
+        if (eyeDesc.Width != srcDesc.Width || eyeDesc.Height != srcDesc.Height
+            || eyeDesc.Format != srcDesc.Format) {
+            return;
+        }
+
+        bool needsNewStaging = !m_depthStagingTexture[eye];
+        if (!needsNewStaging) {
+            D3D11_TEXTURE2D_DESC existingDesc = {};
+            m_depthStagingTexture[eye]->GetDesc(&existingDesc);
+            needsNewStaging = existingDesc.Width != eyeDesc.Width || existingDesc.Height != eyeDesc.Height
+                || existingDesc.Format != eyeDesc.Format;
+        }
+
+        if (needsNewStaging) {
+            D3D11_TEXTURE2D_DESC stagingDesc = eyeDesc;
+            stagingDesc.BindFlags = 0;
+            stagingDesc.MiscFlags = 0;
+            stagingDesc.Usage = D3D11_USAGE_STAGING;
+            stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            stagingDesc.ArraySize = 1;
+            stagingDesc.MipLevels = 1;
+            HRESULT hr = m_pD3DRender->GetDevice()->CreateTexture2D(
+                &stagingDesc, nullptr, &m_depthStagingTexture[eye]
+            );
+            if (FAILED(hr)) {
+                return;
+            }
+        }
+
+        m_pD3DRender->GetContext()->CopyResource(m_depthStagingTexture[eye].Get(), pDepthTexture[eye]);
+
+        D3D11_MAPPED_SUBRESOURCE mapped = {};
+        HRESULT hr = m_pD3DRender->GetContext()->Map(
+            m_depthStagingTexture[eye].Get(), 0, D3D11_MAP_READ, 0, &mapped
+        );
+        if (FAILED(hr)) {
+            return;
+        }
+
+        for (uint32_t y = 0; y < srcDesc.Height; y++) {
+            const uint8_t* rowPtr = (uint8_t*)mapped.pData + y * mapped.RowPitch;
+            for (uint32_t x = 0; x < srcDesc.Width; x++) {
+                float depth = 1.0f;
+                if (formatIsFloat32) {
+                    depth = ((const float*)rowPtr)[x];
+                } else {
+                    uint32_t d24 = ((const uint32_t*)rowPtr)[x] & 0x00FFFFFF;
+                    depth = (float)d24 / 16777215.0f;
+                }
+                depth = std::max(0.0f, std::min(depth, 1.0f));
+                depthData[eye * (srcDesc.Width * srcDesc.Height) + y * srcDesc.Width + x]
+                    = DirectX::PackedVector::XMConvertFloatToHalf(depth);
+            }
+        }
+
+        m_pD3DRender->GetContext()->Unmap(m_depthStagingTexture[eye].Get(), 0);
+    }
+
+    DepthSend(
+        targetTimestampNs,
+        srcDesc.Width,
+        srcDesc.Height,
+        (const unsigned char*)depthData.data(),
+        (int)(depthData.size() * sizeof(uint16_t))
+    );
 }

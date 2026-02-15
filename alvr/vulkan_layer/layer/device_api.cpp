@@ -196,4 +196,46 @@ VKAPI_ATTR VkResult VKAPI_CALL wsi_layer_vkCreateDisplayModeKHR(
   return VK_ERROR_INITIALIZATION_FAILED;
 }
 
+VKAPI_ATTR VkResult VKAPI_CALL wsi_layer_vkCreateImageView(
+    VkDevice device,
+    const VkImageViewCreateInfo *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator,
+    VkImageView *pView) {
+    auto &instance = layer::device_private_data::get(device);
+    VkResult result = instance.disp.CreateImageView(device, pCreateInfo, pAllocator, pView);
+    if (result == VK_SUCCESS) {
+        instance.register_image_view(
+            *pView, pCreateInfo->image, pCreateInfo->format, pCreateInfo->subresourceRange.aspectMask
+        );
+    }
+    return result;
+}
+
+VKAPI_ATTR void VKAPI_CALL wsi_layer_vkDestroyImageView(
+    VkDevice device, VkImageView imageView, const VkAllocationCallbacks *pAllocator) {
+    auto &instance = layer::device_private_data::get(device);
+    instance.unregister_image_view(imageView);
+    instance.disp.DestroyImageView(device, imageView, pAllocator);
+}
+
+VKAPI_ATTR void VKAPI_CALL wsi_layer_vkCmdBeginRendering(
+    VkCommandBuffer commandBuffer, const VkRenderingInfo *pRenderingInfo) {
+    auto &instance = layer::device_private_data::get(commandBuffer);
+    instance.note_begin_rendering(pRenderingInfo);
+    if (instance.disp.CmdBeginRendering) {
+        instance.disp.CmdBeginRendering(commandBuffer, pRenderingInfo);
+    }
+}
+
+VKAPI_ATTR void VKAPI_CALL wsi_layer_vkCmdBeginRenderingKHR(
+    VkCommandBuffer commandBuffer, const VkRenderingInfo *pRenderingInfo) {
+    auto &instance = layer::device_private_data::get(commandBuffer);
+    instance.note_begin_rendering(pRenderingInfo);
+    if (instance.disp.CmdBeginRenderingKHR) {
+        instance.disp.CmdBeginRenderingKHR(commandBuffer, pRenderingInfo);
+    } else if (instance.disp.CmdBeginRendering) {
+        instance.disp.CmdBeginRendering(commandBuffer, pRenderingInfo);
+    }
+}
+
 }

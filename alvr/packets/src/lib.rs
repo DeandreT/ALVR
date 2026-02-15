@@ -22,6 +22,7 @@ pub const HAPTICS: u16 = 1;
 pub const AUDIO: u16 = 2;
 pub const VIDEO: u16 = 3;
 pub const STATISTICS: u16 = 4;
+pub const DEPTH: u16 = 5;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct VideoStreamingCapabilitiesExt {
@@ -237,6 +238,15 @@ pub struct VideoPacketHeader {
     pub timestamp: Duration,
     pub global_view_params: [ViewParams; 2],
     pub is_idr: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy)]
+pub struct DepthPacketHeader {
+    pub timestamp: Duration,
+    pub width: u32,
+    pub height: u32,
+    pub eye_count: u8,
+    pub bytes_per_pixel: u8,
 }
 
 #[derive(Serialize, Deserialize)]

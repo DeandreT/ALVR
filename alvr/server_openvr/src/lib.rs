@@ -404,6 +404,21 @@ extern "C" fn send_video(timestamp_ns: u64, buffer_ptr: *mut u8, len: i32, is_id
     }
 }
 
+extern "C" fn send_depth(
+    timestamp_ns: u64,
+    width: u32,
+    height: u32,
+    buffer_ptr: *const u8,
+    len: i32,
+) {
+    if let Some(context) = &*SERVER_CORE_CONTEXT.read() {
+        let timestamp = Duration::from_nanos(timestamp_ns);
+        let buffer = unsafe { std::slice::from_raw_parts(buffer_ptr, len as usize) };
+
+        context.send_depth_map(timestamp, width, height, buffer.to_vec());
+    }
+}
+
 extern "C" fn get_dynamic_encoder_params() -> FfiDynamicEncoderParams {
     if let Some(context) = &*SERVER_CORE_CONTEXT.read()
         && let Some(params) = context.get_dynamic_encoder_params()
@@ -540,6 +555,7 @@ pub unsafe extern "C" fn HmdDriverFactory(
             HapticsSend = Some(send_haptics);
             SetVideoConfigNals = Some(set_video_config_nals);
             VideoSend = Some(send_video);
+            DepthSend = Some(send_depth);
             GetDynamicEncoderParams = Some(get_dynamic_encoder_params);
             ReportComposed = Some(report_composed);
             ReportPresent = Some(report_present);

@@ -14,7 +14,7 @@ use alvr_common::{
     glam::{UVec2, Vec2},
     parking_lot::RwLock,
 };
-use alvr_graphics::{GraphicsContext, StreamRenderer, StreamViewParams};
+use alvr_graphics::{DepthReprojectionFrame, GraphicsContext, StreamRenderer, StreamViewParams};
 use alvr_packets::{RealTimeConfig, StreamConfig, TrackingData};
 use alvr_session::{
     ClientsideFoveationConfig, ClientsideFoveationMode, ClientsidePostProcessingConfig, CodecType,
@@ -41,6 +41,8 @@ pub struct ParsedStreamConfig {
     pub foveated_encoding_config: Option<FoveatedEncodingConfig>,
     pub clientside_foveation_config: Option<ClientsideFoveationConfig>,
     pub clientside_post_processing: Option<ClientsidePostProcessingConfig>,
+    pub asynchronous_space_warp: bool,
+    pub depth_based_frame_synthesis: bool,
     pub upscaling: Option<UpscalingConfig>,
     pub force_software_decoder: bool,
     pub max_buffering_frames: f32,
@@ -74,6 +76,8 @@ impl ParsedStreamConfig {
                 .clientside_post_processing
                 .as_option()
                 .cloned(),
+            asynchronous_space_warp: config.settings.video.asynchronous_space_warp,
+            depth_based_frame_synthesis: config.settings.video.depth_based_frame_synthesis,
             upscaling: config.settings.video.upscaling.as_option().cloned(),
             force_software_decoder: config.settings.video.force_software_decoder,
             max_buffering_frames: config.settings.video.max_buffering_frames,
@@ -229,7 +233,7 @@ impl StreamContext {
         ));
 
         let mut this = StreamContext {
-            use_custom_reprojection: core_ctx.platform().is_yvr(),
+            use_custom_reprojection: core_ctx.platform().is_yvr() || config.asynchronous_space_warp,
             core_context: core_ctx,
             xr_session,
             interaction_context: interaction_ctx,
@@ -421,6 +425,26 @@ impl StreamContext {
             openxr_display_time = vsync_time;
         }
 
+        let depth_frame_owned =
+            if self.use_custom_reprojection && self.config.depth_based_frame_synthesis {
+                self.core_context.take_depth_frame(timestamp)
+            } else {
+                None
+            };
+        let depth_reprojection = depth_frame_owned.as_ref().and_then(|depth| {
+            if depth.eye_count != 2 || depth.bytes_per_pixel == 0 {
+                return None;
+            }
+
+            let eye_len = depth.payload.len() / 2;
+            (depth.payload.len() >= eye_len * 2).then_some(DepthReprojectionFrame {
+                resolution: UVec2::new(depth.width, depth.height),
+                left_eye: &depth.payload[..eye_len],
+                right_eye: &depth.payload[eye_len..(eye_len * 2)],
+                bytes_per_pixel: depth.bytes_per_pixel,
+            })
+        });
+
         self.renderer.render(
             buffer_ptr,
             [
@@ -436,6 +460,7 @@ impl StreamContext {
                 },
             ],
             self.config.passthrough.as_ref(),
+            depth_reprojection,
         );
 
         self.swapchains[0].release_image().unwrap();

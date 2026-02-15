@@ -61,6 +61,7 @@ public:
         const std::string& debugText
     );
     void GetEncodingResolution(uint32_t* width, uint32_t* height);
+    void SendDepth(ID3D11Texture2D* pDepthTexture[2], uint64_t targetTimestampNs);
 
     ComPtr<ID3D11Texture2D> GetTexture();
 
@@ -110,6 +111,8 @@ private:
     bool enableFFE;
 
     std::unique_ptr<d3d_render_utils::RenderPipelineYUV> m_yuvPipeline;
+
+    ComPtr<ID3D11Texture2D> m_depthStagingTexture[2];
 
     static bool SetGpuPriority(ID3D11Device* device) {
         typedef enum _D3DKMT_SCHEDULINGPRIORITYCLASS {

@@ -124,6 +124,13 @@ extern "C" void (*SetVideoConfigNals)(const unsigned char* configBuffer, int len
 extern "C" void (*VideoSend)(
     unsigned long long targetTimestampNs, unsigned char* buf, int len, bool isIdr
 );
+extern "C" void (*DepthSend)(
+    unsigned long long targetTimestampNs,
+    unsigned int width,
+    unsigned int height,
+    const unsigned char* buf,
+    int len
+);
 extern "C" void (*HapticsSend)(
     unsigned long long path, float duration_s, float frequency, float amplitude
 );

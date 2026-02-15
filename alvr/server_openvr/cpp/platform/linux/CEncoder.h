@@ -5,6 +5,7 @@
 #include <atomic>
 #include <memory>
 #include <poll.h>
+#include <vector>
 #include <sys/types.h>
 
 class PoseHistory;
@@ -23,13 +24,13 @@ public:
     void CaptureFrame();
 
 private:
-    void GetFds(int client, int (*fds)[6]);
+    void GetFds(int client, size_t fd_count, std::vector<int>& fds);
     std::shared_ptr<PoseHistory> m_poseHistory;
     std::atomic_bool m_exiting { false };
     IDRScheduler m_scheduler;
     pollfd m_socket;
     std::string m_socketPath;
-    int m_fds[6];
+    std::vector<int> m_fds;
     bool m_connected = false;
     std::atomic_bool m_captureFrame = false;
 };

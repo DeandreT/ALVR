@@ -776,6 +776,20 @@ If you want to reduce the amount of pixelation on the edges, increase the center
     #[schema(flag = "real-time")]
     pub clientside_post_processing: Switch<ClientsidePostProcessingConfig>,
 
+    #[schema(strings(
+        display_name = "Asynchronous space warp",
+        help = "Client-side reprojection that warps the last decoded frame to the latest headset pose. Can reduce judder when frame delivery is unstable, but may introduce visual artifacts."
+    ))]
+    #[schema(flag = "real-time")]
+    pub asynchronous_space_warp: bool,
+
+    #[schema(strings(
+        display_name = "Depth-based frame synthesis",
+        help = "Use streamed per-eye depth to synthesize translation-aware reprojection. Requires depth packets from the streamer implementation."
+    ))]
+    #[schema(flag = "real-time")]
+    pub depth_based_frame_synthesis: bool,
+
     #[schema(strings(help = "Snapdragon Game Super Resolution client-side upscaling"))]
     pub upscaling: Switch<UpscalingConfig>,
 }
@@ -1707,6 +1721,8 @@ pub fn session_settings_default() -> SettingsDefault {
                     },
                 },
             },
+            asynchronous_space_warp: false,
+            depth_based_frame_synthesis: false,
             upscaling: SwitchDefault {
                 enabled: false,
                 content: UpscalingConfigDefault {

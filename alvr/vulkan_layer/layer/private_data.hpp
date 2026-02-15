@@ -35,6 +35,7 @@
 #include <memory>
 #include <mutex>
 #include <unordered_set>
+#include <unordered_map>
 
 using scoped_mutex = std::lock_guard<std::mutex>;
 
@@ -100,14 +101,21 @@ struct instance_dispatch_table {
     REQUIRED(ResetCommandBuffer)                                                                   \
     REQUIRED(BeginCommandBuffer)                                                                   \
     REQUIRED(EndCommandBuffer)                                                                     \
+    REQUIRED(CmdPipelineBarrier)                                                                   \
+    REQUIRED(CmdCopyImage)                                                                         \
+    OPTIONAL(CmdBeginRendering)                                                                    \
+    OPTIONAL(CmdBeginRenderingKHR)                                                                 \
     REQUIRED(CreateImage)                                                                          \
     REQUIRED(DestroyImage)                                                                         \
+    REQUIRED(CreateImageView)                                                                      \
+    REQUIRED(DestroyImageView)                                                                     \
     REQUIRED(GetImageMemoryRequirements)                                                           \
     REQUIRED(BindImageMemory)                                                                      \
     REQUIRED(AllocateMemory)                                                                       \
     REQUIRED(FreeMemory)                                                                           \
     REQUIRED(CreateFence)                                                                          \
     REQUIRED(DestroyFence)                                                                         \
+    REQUIRED(DestroySemaphore)                                                                     \
     REQUIRED(ResetFences)                                                                          \
     REQUIRED(WaitForFences)                                                                        \
     OPTIONAL(CreateSwapchainKHR)                                                                   \
@@ -204,6 +212,13 @@ class instance_private_data {
 
 class device_private_data {
   public:
+    struct depth_source_info {
+        VkImage image{VK_NULL_HANDLE};
+        VkFormat format{VK_FORMAT_UNDEFINED};
+        VkImageLayout layout{VK_IMAGE_LAYOUT_UNDEFINED};
+        bool valid{false};
+    };
+
     device_private_data() = delete;
     device_private_data(const device_private_data &) = delete;
     device_private_data &operator=(const device_private_data &) = delete;
@@ -222,6 +237,7 @@ class device_private_data {
      * @brief Get the layer device object associated to the VkDevice owning the specified VkQueue.
      */
     static device_private_data &get(VkQueue queue);
+    static device_private_data &get(VkCommandBuffer command_buffer);
 
     void add_layer_swapchain(VkSwapchainKHR swapchain);
 
@@ -247,6 +263,17 @@ class device_private_data {
      */
     bool can_icds_create_swapchain(VkSurfaceKHR vk_surface);
 
+    void register_layer_swapchain_image(VkImage image);
+    void register_image_view(
+        VkImageView image_view,
+        VkImage image,
+        VkFormat format,
+        VkImageAspectFlags aspect_mask
+    );
+    void unregister_image_view(VkImageView image_view);
+    void note_begin_rendering(const VkRenderingInfo *rendering_info);
+    bool get_depth_source_for_color_image(VkImage color_image, depth_source_info &source_info);
+
     static void destroy(VkDevice dev);
 
     const device_dispatch_table disp;
@@ -257,8 +284,17 @@ class device_private_data {
 
     std::unique_ptr<wsi::display> display;
   private:
+    struct image_view_info {
+        VkImage image{VK_NULL_HANDLE};
+        VkFormat format{VK_FORMAT_UNDEFINED};
+        VkImageAspectFlags aspect_mask{0};
+    };
+
     std::unordered_set<VkSwapchainKHR> swapchains;
     mutable std::mutex swapchains_lock;
+    std::unordered_set<VkImage> layer_swapchain_images;
+    std::unordered_map<VkImageView, image_view_info> image_views;
+    std::unordered_map<VkImage, depth_source_info> color_to_depth_source;
 };
 
 } /* namespace layer */

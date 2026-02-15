@@ -6,22 +6,23 @@ use alvr_common::{
 use alvr_session::{FoveatedEncodingConfig, PassthroughMode, UpscalingConfig};
 use std::{ffi::c_void, iter, mem, rc::Rc};
 use wgpu::{
+    Buffer, BufferDescriptor, BufferUsages,
     BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BindingResource, BindingType, Color, ColorTargetState, ColorWrites,
-    FragmentState, LoadOp, PipelineCompilationOptions, PipelineLayoutDescriptor, PrimitiveState,
-    PrimitiveTopology, PushConstantRange, RenderPass, RenderPassColorAttachment,
-    RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor, SamplerBindingType,
-    SamplerDescriptor, ShaderStages, StoreOp, TextureSampleType, TextureView,
+    Extent3d, FragmentState, LoadOp, Origin3d, PipelineCompilationOptions,
+    PipelineLayoutDescriptor, PrimitiveState, PrimitiveTopology, PushConstantRange, RenderPass,
+    RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor,
+    SamplerBindingType, SamplerDescriptor, ShaderStages, StoreOp, TexelCopyBufferLayout,
+    TexelCopyTextureInfo, Texture, TextureAspect, TextureSampleType, TextureView,
     TextureViewDescriptor, TextureViewDimension, VertexState, include_wgsl,
 };
 
 const FLOAT_SIZE: u32 = mem::size_of::<f32>() as u32;
 const U32_SIZE: u32 = mem::size_of::<u32>() as u32;
 const VEC4_SIZE: u32 = mem::size_of::<Vec4>() as u32;
-const TRANSFORM_SIZE: u32 = mem::size_of::<Mat4>() as u32;
+const REPROJECTION_UNIFORM_SIZE: u32 = 16 * FLOAT_SIZE * 4 + 4 * U32_SIZE;
 
-const TRANSFORM_CONST_OFFSET: u32 = 0;
-const VIEW_INDEX_CONST_OFFSET: u32 = TRANSFORM_SIZE;
+const VIEW_INDEX_CONST_OFFSET: u32 = 0;
 const PASSTHROUGH_MODE_OFFSET: u32 = VIEW_INDEX_CONST_OFFSET + U32_SIZE;
 const ALPHA_CONST_OFFSET: u32 = PASSTHROUGH_MODE_OFFSET + U32_SIZE;
 const CK_CHANNEL0_CONST_OFFSET: u32 = ALPHA_CONST_OFFSET + FLOAT_SIZE + U32_SIZE;
@@ -40,10 +41,19 @@ pub struct StreamViewParams {
     pub output_view_params: ViewParams,
 }
 
+pub struct DepthReprojectionFrame<'a> {
+    pub resolution: UVec2,
+    pub left_eye: &'a [u8],
+    pub right_eye: &'a [u8],
+    pub bytes_per_pixel: u8,
+}
+
 #[derive(Debug)]
 struct ViewObjects {
     bind_group: BindGroup,
     render_target: Vec<TextureView>,
+    depth_texture: Texture,
+    reprojection_uniform_buffer: Buffer,
 }
 
 pub struct StreamRenderer {
@@ -51,6 +61,7 @@ pub struct StreamRenderer {
     staging_renderer: StagingRenderer,
     pipeline: RenderPipeline,
     views_objects: [ViewObjects; 2],
+    base_view_resolution: UVec2,
 }
 
 impl StreamRenderer {
@@ -89,6 +100,32 @@ impl StreamRenderer {
                     binding: 1,
                     visibility: ShaderStages::FRAGMENT,
                     ty: BindingType::Sampler(SamplerBindingType::Filtering),
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: ShaderStages::VERTEX_FRAGMENT,
+                    ty: BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Texture {
+                        sample_type: TextureSampleType::Float { filterable: false },
+                        view_dimension: TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Sampler(SamplerBindingType::NonFiltering),
                     count: None,
                 },
             ],
@@ -176,11 +213,24 @@ impl StreamRenderer {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
+        let depth_sampler = device.create_sampler(&SamplerDescriptor {
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
 
         let mut view_objects = vec![];
         let mut staging_textures_gl = vec![];
         for target_swapchain in &swapchain_textures {
             let staging_texture = super::create_texture(device, staging_resolution, target_format);
+            let depth_texture =
+                super::create_texture(device, base_view_resolution, wgpu::TextureFormat::R16Float);
+            let reprojection_uniform_buffer = device.create_buffer(&BufferDescriptor {
+                label: None,
+                size: REPROJECTION_UNIFORM_SIZE as u64,
+                usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
 
             let bind_group = device.create_bind_group(&BindGroupDescriptor {
                 label: None,
@@ -196,6 +246,20 @@ impl StreamRenderer {
                         binding: 1,
                         resource: BindingResource::Sampler(&sampler),
                     },
+                    BindGroupEntry {
+                        binding: 2,
+                        resource: reprojection_uniform_buffer.as_entire_binding(),
+                    },
+                    BindGroupEntry {
+                        binding: 3,
+                        resource: BindingResource::TextureView(
+                            &depth_texture.create_view(&TextureViewDescriptor::default()),
+                        ),
+                    },
+                    BindGroupEntry {
+                        binding: 4,
+                        resource: BindingResource::Sampler(&depth_sampler),
+                    },
                 ],
             });
 
@@ -209,6 +273,8 @@ impl StreamRenderer {
             view_objects.push(ViewObjects {
                 bind_group,
                 render_target,
+                depth_texture,
+                reprojection_uniform_buffer,
             });
 
             #[cfg(not(any(target_os = "macos", target_os = "ios")))]
@@ -238,6 +304,7 @@ impl StreamRenderer {
             staging_renderer,
             pipeline,
             views_objects: view_objects.try_into().unwrap(),
+            base_view_resolution,
         }
     }
 
@@ -248,11 +315,53 @@ impl StreamRenderer {
         hardware_buffer: *mut c_void,
         view_params: [StreamViewParams; 2],
         passthrough: Option<&PassthroughMode>,
+        depth_reprojection: Option<DepthReprojectionFrame<'_>>,
     ) {
         // if hardware_buffer is available copy stream to staging texture
         if !hardware_buffer.is_null() {
             self.staging_renderer.render(hardware_buffer);
         }
+
+        let depth_enabled = if let Some(depth_frame) = depth_reprojection {
+            let expected_eye_bytes = self.base_view_resolution.x as usize
+                * self.base_view_resolution.y as usize
+                * depth_frame.bytes_per_pixel as usize;
+            let valid = depth_frame.bytes_per_pixel == 2
+                && depth_frame.resolution == self.base_view_resolution
+                && depth_frame.left_eye.len() == expected_eye_bytes
+                && depth_frame.right_eye.len() == expected_eye_bytes;
+
+            if valid {
+                for (view_idx, bytes) in [depth_frame.left_eye, depth_frame.right_eye]
+                    .iter()
+                    .enumerate()
+                {
+                    self.context.queue.write_texture(
+                        TexelCopyTextureInfo {
+                            texture: &self.views_objects[view_idx].depth_texture,
+                            mip_level: 0,
+                            origin: Origin3d::ZERO,
+                            aspect: TextureAspect::All,
+                        },
+                        bytes,
+                        TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(self.base_view_resolution.x * 2),
+                            rows_per_image: Some(self.base_view_resolution.y),
+                        },
+                        Extent3d {
+                            width: self.base_view_resolution.x,
+                            height: self.base_view_resolution.y,
+                            depth_or_array_layers: 1,
+                        },
+                    );
+                }
+            }
+
+            valid
+        } else {
+            false
+        };
 
         let mut encoder = self
             .context
@@ -307,19 +416,30 @@ impl StreamRenderer {
             let proj_mat = super::projection_from_fov(view_params.output_view_params.fov);
 
             let transform = proj_mat * view_mat * model_mat;
+            let input_from_output = input_mat4.inverse() * output_mat4;
+            let output_proj_inverse = proj_mat.inverse();
+            let input_proj = super::projection_from_fov(view_params.input_view_params.fov);
 
-            let transform_bytes = transform
-                .to_cols_array()
-                .iter()
-                .flat_map(|v| v.to_le_bytes())
-                .collect::<Vec<u8>>();
+            let mut reproj_uniform_bytes =
+                Vec::with_capacity(REPROJECTION_UNIFORM_SIZE as usize);
+            for matrix in [transform, input_from_output, output_proj_inverse, input_proj] {
+                for value in matrix.to_cols_array() {
+                    reproj_uniform_bytes.extend(value.to_le_bytes());
+                }
+            }
+            let flags: u32 = if depth_enabled { 1 } else { 0 };
+            reproj_uniform_bytes.extend(flags.to_le_bytes());
+            // Pad uniform data to vec4 alignment.
+            reproj_uniform_bytes.extend(0u32.to_le_bytes());
+            reproj_uniform_bytes.extend(0u32.to_le_bytes());
+            reproj_uniform_bytes.extend(0u32.to_le_bytes());
+            self.context.queue.write_buffer(
+                &self.views_objects[view_idx].reprojection_uniform_buffer,
+                0,
+                &reproj_uniform_bytes,
+            );
 
             render_pass.set_pipeline(&self.pipeline);
-            render_pass.set_push_constants(
-                ShaderStages::VERTEX_FRAGMENT,
-                TRANSFORM_CONST_OFFSET,
-                &transform_bytes,
-            );
             render_pass.set_push_constants(
                 ShaderStages::VERTEX_FRAGMENT,
                 VIEW_INDEX_CONST_OFFSET,

@@ -442,6 +442,12 @@ impl StatisticsTab {
                 statistics.video_packets_total, statistics.video_packets_per_sec
             ));
 
+            ui[0].label("Depth packets:");
+            ui[1].label(format!(
+                "{} packets ({} packets/s)",
+                statistics.depth_packets_total, statistics.depth_packets_per_sec
+            ));
+
             ui[0].label("Total sent:");
             ui[1].label(format!("{} MB", statistics.video_mbytes_total));
 
@@ -465,6 +471,24 @@ impl StatisticsTab {
 
             ui[0].label("Streamer FPS:");
             ui[1].label(format!("{} FPS", statistics.server_fps));
+
+            ui[0].label("Asynchronous space warp:");
+            ui[1].label(if statistics.asynchronous_space_warp_enabled {
+                "enabled"
+            } else {
+                "disabled"
+            });
+
+            ui[0].label("Depth frame synthesis:");
+            ui[1].label(if statistics.depth_based_frame_synthesis_enabled {
+                if statistics.depth_packets_per_sec > 0 {
+                    "enabled (active depth stream)"
+                } else {
+                    "enabled (no depth packets)"
+                }
+            } else {
+                "disabled"
+            });
 
             ui[0].label("Headset battery");
             ui[1].label(format!(

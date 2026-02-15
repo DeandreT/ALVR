@@ -451,6 +451,28 @@ pub unsafe extern "C" fn alvr_send_video_nal(
     }
 }
 
+/// `buffer_ptr` must point to a contiguous depth payload containing both eyes.
+/// Current expected format is R16F with left eye followed by right eye.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn alvr_send_depth_map(
+    timestamp_ns: u64,
+    width: u32,
+    height: u32,
+    buffer_ptr: *const u8,
+    len: i32,
+) {
+    if let Some(context) = &*SERVER_CORE_CONTEXT.read() {
+        let buffer = unsafe { std::slice::from_raw_parts(buffer_ptr, len as usize) };
+
+        context.send_depth_map(
+            Duration::from_nanos(timestamp_ns),
+            width,
+            height,
+            buffer.to_vec(),
+        );
+    }
+}
+
 /// Returns true if updated
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn alvr_get_dynamic_encoder_params(

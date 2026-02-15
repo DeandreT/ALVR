@@ -20,8 +20,9 @@ use alvr_common::{
 use alvr_events::{AdbEvent, ButtonEvent, EventType};
 use alvr_packets::{
     AUDIO, ClientConnectionResult, ClientConnectionsAction, ClientControlPacket, ClientStatistics,
-    HAPTICS, NegotiatedStreamingConfig, NegotiatedStreamingConfigExt, RealTimeConfig, STATISTICS,
-    ServerControlPacket, StreamConfigPacket, TRACKING, TrackingData, VIDEO, VideoPacketHeader,
+    DEPTH, DepthPacketHeader, HAPTICS, NegotiatedStreamingConfig, NegotiatedStreamingConfigExt,
+    RealTimeConfig, STATISTICS, ServerControlPacket, StreamConfigPacket, TRACKING, TrackingData,
+    VIDEO, VideoPacketHeader,
 };
 use alvr_session::{
     BodyTrackingSinkConfig, CodecType, ControllersEmulationMode, FrameSize, H264Profile,
@@ -49,6 +50,11 @@ const MAX_UNREAD_PACKETS: usize = 10; // Applies per stream
 
 pub struct VideoPacket {
     pub header: VideoPacketHeader,
+    pub payload: Vec<u8>,
+}
+
+pub struct DepthPacket {
+    pub header: DepthPacketHeader,
     pub payload: Vec<u8>,
 }
 
@@ -822,6 +828,8 @@ fn connection_pipeline(
         } else {
             0.0
         },
+        initial_settings.video.asynchronous_space_warp,
+        initial_settings.video.depth_based_frame_synthesis,
     ));
 
     *ctx.bitrate_manager.lock() =
@@ -845,6 +853,7 @@ fn connection_pipeline(
     )?;
 
     let mut video_sender = stream_socket.request_stream(VIDEO);
+    let mut depth_sender = stream_socket.request_stream(DEPTH);
     let game_audio_sender: alvr_sockets::StreamSender<()> = stream_socket.request_stream(AUDIO);
     let mut microphone_receiver: alvr_sockets::StreamReceiver<()> =
         stream_socket.subscribe_to_stream(AUDIO, MAX_UNREAD_PACKETS);
@@ -856,7 +865,10 @@ fn connection_pipeline(
 
     let (video_channel_sender, video_channel_receiver) =
         std::sync::mpsc::sync_channel(initial_settings.connection.max_queued_server_video_frames);
+    let (depth_channel_sender, depth_channel_receiver) =
+        std::sync::mpsc::sync_channel(initial_settings.connection.max_queued_server_video_frames);
     *ctx.video_channel_sender.lock() = Some(video_channel_sender);
+    *ctx.depth_channel_sender.lock() = Some(depth_channel_sender);
     *ctx.haptics_sender.lock() = Some(haptics_sender);
 
     let video_send_thread = thread::spawn({
@@ -881,6 +893,27 @@ fn connection_pipeline(
                 video_sender
                     .send_header_with_payload(&header, &payload)
                     .ok();
+            }
+        }
+    });
+
+    let depth_send_thread = thread::spawn({
+        let ctx = Arc::clone(&ctx);
+        let client_hostname = client_hostname.clone();
+        move || {
+            while is_streaming(&client_hostname) {
+                let DepthPacket { header, payload } =
+                    match depth_channel_receiver.recv_timeout(STREAMING_RECV_TIMEOUT) {
+                        Ok(packet) => packet,
+                        Err(RecvTimeoutError::Timeout) => continue,
+                        Err(RecvTimeoutError::Disconnected) => return,
+                    };
+
+                if let Some(stats) = ctx.statistics_manager.write().as_mut() {
+                    stats.report_depth_frame_sent();
+                }
+
+                depth_sender.send_header_with_payload(&header, &payload).ok();
             }
         }
     });
@@ -1390,6 +1423,7 @@ fn connection_pipeline(
 
     // This requests shutdown from threads
     *ctx.video_channel_sender.lock() = None;
+    *ctx.depth_channel_sender.lock() = None;
     *ctx.haptics_sender.lock() = None;
 
     *ctx.video_recording_file.lock() = None;
@@ -1426,6 +1460,7 @@ fn connection_pipeline(
     // Ensure shutdown of threads
     dbg_connection!("connection_pipeline: Shutdown threads");
     video_send_thread.join().ok();
+    depth_send_thread.join().ok();
     game_audio_thread.join().ok();
     microphone_thread.join().ok();
     tracking_receive_thread.join().ok();

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cstdint>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -65,6 +66,9 @@ public:
     void Startup(uint32_t width, uint32_t height, VkFormat format);
 
     void AddImage(VkImageCreateInfo imageInfo, size_t memoryIndex, int imageFd, int semaphoreFd);
+    void AddDepthImage(
+        VkImageCreateInfo imageInfo, size_t memoryIndex, int imageFd, int semaphoreFd
+    );
 
     void AddPipeline(RenderPipeline* pipeline);
 
@@ -72,6 +76,7 @@ public:
     void ImportOutput(const DrmImage& drm);
 
     void Render(uint32_t index, uint64_t waitValue);
+    void SendDepth(uint32_t index, uint64_t waitValue, uint64_t targetTimestampNs);
 
     void Sync();
 
@@ -90,6 +95,14 @@ public:
         VkDeviceMemory memory = VK_NULL_HANDLE;
         VkSemaphore semaphore = VK_NULL_HANDLE;
         VkImageView view = VK_NULL_HANDLE;
+        VkFormat format = VK_FORMAT_UNDEFINED;
+    };
+
+    struct DepthReadback {
+        VkBuffer buffer = VK_NULL_HANDLE;
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+        uint8_t* mapped = nullptr;
+        size_t size = 0;
     };
 
     struct StagingImage {
@@ -127,8 +140,10 @@ public:
 
     Output m_output;
     std::vector<InputImage> m_images;
+    std::vector<InputImage> m_depthImages;
     std::vector<StagingImage> m_stagingImages;
     std::vector<RenderPipeline*> m_pipelines;
+    DepthReadback m_depthReadback;
 
     VkInstance m_inst = VK_NULL_HANDLE;
     VkDevice m_dev = VK_NULL_HANDLE;

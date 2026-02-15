@@ -8,6 +8,10 @@ use std::{path::PathBuf, time::Duration};
 pub struct StatisticsSummary {
     pub video_packets_total: usize,
     pub video_packets_per_sec: usize,
+    #[serde(default)]
+    pub depth_packets_total: usize,
+    #[serde(default)]
+    pub depth_packets_per_sec: usize,
     pub video_mbytes_total: usize,
     pub video_mbits_per_sec: f32,
     pub total_latency_ms: f32,
@@ -16,6 +20,10 @@ pub struct StatisticsSummary {
     pub decode_latency_ms: f32,
     pub client_fps: u32,
     pub server_fps: u32,
+    #[serde(default)]
+    pub asynchronous_space_warp_enabled: bool,
+    #[serde(default)]
+    pub depth_based_frame_synthesis_enabled: bool,
     pub battery_hmd: u32,
     pub hmd_plugged: bool,
 }

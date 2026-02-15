@@ -57,6 +57,16 @@ pub enum ClientCoreEvent {
     RealTimeConfig(RealTimeConfig),
 }
 
+#[derive(Clone)]
+pub struct DepthFrame {
+    pub timestamp: Duration,
+    pub width: u32,
+    pub height: u32,
+    pub eye_count: u8,
+    pub bytes_per_pixel: u8,
+    pub payload: Vec<u8>,
+}
+
 // Note: this struct may change without breaking network protocol changes
 #[derive(Clone)]
 pub struct ClientCapabilities {
@@ -307,6 +317,20 @@ impl ClientCoreContext {
                 }
             }
         }
+    }
+
+    pub fn take_depth_frame(&self, timestamp: Duration) -> Option<DepthFrame> {
+        let queue = &mut *self.connection_context.depth_frames_queue.lock();
+
+        if let Some(index) = queue.iter().position(|f| f.timestamp == timestamp) {
+            return queue.remove(index);
+        }
+
+        while queue.len() > 64 {
+            queue.pop_front();
+        }
+
+        None
     }
 
     pub fn platform(&self) -> Platform {

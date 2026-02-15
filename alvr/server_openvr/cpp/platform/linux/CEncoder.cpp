@@ -100,7 +100,7 @@ void av_logfn(void*, int level, const char* data, va_list va) {
 
 } // namespace
 
-void CEncoder::GetFds(int client, int (*received_fds)[6]) {
+void CEncoder::GetFds(int client, size_t fd_count, std::vector<int>& fds) {
     struct msghdr msg;
     struct cmsghdr* cmsg;
     union {
@@ -128,7 +128,11 @@ void CEncoder::GetFds(int client, int (*received_fds)[6]) {
 
     for (cmsg = CMSG_FIRSTHDR(&msg); cmsg != NULL; cmsg = CMSG_NXTHDR(&msg, cmsg)) {
         if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
-            memcpy(received_fds, CMSG_DATA(cmsg), sizeof(*received_fds));
+            if (cmsg->cmsg_len < CMSG_LEN(sizeof(int) * fd_count)) {
+                throw MakeException("received too few fds");
+            }
+            fds.resize(fd_count);
+            memcpy(fds.data(), CMSG_DATA(cmsg), sizeof(int) * fd_count);
             break;
         }
     }
@@ -194,7 +198,11 @@ void CEncoder::Run() {
     Info("CEncoder client connected, pid %d, cmdline %s\n", (int)init.source_pid, ifbuf2);
 
     try {
-        GetFds(client.fd, &m_fds);
+        size_t fd_count = init.num_images * 2;
+        if (init.has_depth) {
+            fd_count += init.num_images * 2;
+        }
+        GetFds(client.fd, fd_count, m_fds);
 
         m_connected = true;
 
@@ -204,7 +212,7 @@ void CEncoder::Run() {
 
         alvr::VkContext vk_ctx(init.device_uuid.data(), {});
 
-        FrameRender render(vk_ctx, init, m_fds);
+        FrameRender render(vk_ctx, init, m_fds.data());
         auto output = render.CreateOutput();
 
         alvr::VkFrame frame(
@@ -244,6 +252,13 @@ void CEncoder::Run() {
             }
 
             render.Render(frame_info.image, frame_info.semaphore_value);
+            if (frame_info.has_depth) {
+                render.SendDepth(
+                    frame_info.depth_image,
+                    frame_info.depth_semaphore_value,
+                    pose->targetTimestampNs
+                );
+            }
 
             if (!valid_timestamps) {
                 ReportPresent(pose->targetTimestampNs, 0);

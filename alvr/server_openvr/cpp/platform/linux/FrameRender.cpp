@@ -23,8 +23,19 @@ FrameRender::FrameRender(alvr::VkContext& ctx, init_packet& init, int fds[])
         init.image_create_info.format
     );
 
-    for (size_t i = 0; i < 3; ++i) {
+    for (size_t i = 0; i < init.num_images; ++i) {
         AddImage(init.image_create_info, init.mem_index, fds[2 * i], fds[2 * i + 1]);
+    }
+    if (init.has_depth) {
+        const size_t depth_fds_offset = init.num_images * 2;
+        for (size_t i = 0; i < init.num_images; ++i) {
+            AddDepthImage(
+                init.depth_image_create_info,
+                init.depth_mem_index,
+                fds[depth_fds_offset + 2 * i],
+                fds[depth_fds_offset + 2 * i + 1]
+            );
+        }
     }
 
     m_width = Settings::Instance().m_renderWidth;

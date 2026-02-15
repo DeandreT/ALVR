@@ -157,6 +157,10 @@ device_private_data &device_private_data::get(VkQueue queue) {
     return get_device_private_data(queue);
 }
 
+device_private_data &device_private_data::get(VkCommandBuffer command_buffer) {
+    return get_device_private_data(command_buffer);
+}
+
 void device_private_data::add_layer_swapchain(VkSwapchainKHR swapchain) {
     scoped_mutex lock(swapchains_lock);
     swapchains.insert(swapchain);
@@ -179,6 +183,86 @@ bool device_private_data::should_layer_create_swapchain(VkSurfaceKHR vk_surface)
 
 bool device_private_data::can_icds_create_swapchain(VkSurfaceKHR vk_surface) {
     return disp.CreateSwapchainKHR != nullptr;
+}
+
+void device_private_data::register_layer_swapchain_image(VkImage image) {
+    scoped_mutex lock(swapchains_lock);
+    layer_swapchain_images.insert(image);
+}
+
+void device_private_data::register_image_view(
+    VkImageView image_view, VkImage image, VkFormat format, VkImageAspectFlags aspect_mask
+) {
+    scoped_mutex lock(swapchains_lock);
+    image_views[image_view] = image_view_info{image, format, aspect_mask};
+}
+
+void device_private_data::unregister_image_view(VkImageView image_view) {
+    scoped_mutex lock(swapchains_lock);
+    image_views.erase(image_view);
+}
+
+void device_private_data::note_begin_rendering(const VkRenderingInfo *rendering_info) {
+    if (rendering_info == nullptr || rendering_info->pColorAttachments == nullptr) {
+        return;
+    }
+
+    VkImageView depth_view = VK_NULL_HANDLE;
+    VkImageLayout depth_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    if (rendering_info->pDepthAttachment != nullptr) {
+        depth_view = rendering_info->pDepthAttachment->imageView;
+        depth_layout = rendering_info->pDepthAttachment->imageLayout;
+    }
+
+    scoped_mutex lock(swapchains_lock);
+
+    for (uint32_t i = 0; i < rendering_info->colorAttachmentCount; ++i) {
+        const VkImageView color_view = rendering_info->pColorAttachments[i].imageView;
+        if (color_view == VK_NULL_HANDLE) {
+            continue;
+        }
+
+        auto color_it = image_views.find(color_view);
+        if (color_it == image_views.end()) {
+            continue;
+        }
+
+        const VkImage color_image = color_it->second.image;
+        if (layer_swapchain_images.find(color_image) == layer_swapchain_images.end()) {
+            continue;
+        }
+
+        if (depth_view == VK_NULL_HANDLE || image_views.find(depth_view) == image_views.end()) {
+            color_to_depth_source.erase(color_image);
+            continue;
+        }
+
+        const auto &depth_info = image_views[depth_view];
+        if ((depth_info.aspect_mask & VK_IMAGE_ASPECT_DEPTH_BIT) == 0) {
+            color_to_depth_source.erase(color_image);
+            continue;
+        }
+
+        color_to_depth_source[color_image] = depth_source_info{
+            depth_info.image,
+            depth_info.format,
+            depth_layout,
+            true,
+        };
+    }
+}
+
+bool device_private_data::get_depth_source_for_color_image(
+    VkImage color_image, depth_source_info &source_info
+) {
+    scoped_mutex lock(swapchains_lock);
+    auto it = color_to_depth_source.find(color_image);
+    if (it == color_to_depth_source.end()) {
+        return false;
+    }
+    source_info = it->second;
+    return it->second.valid;
 }
 
 void device_private_data::destroy(VkDevice dev) {

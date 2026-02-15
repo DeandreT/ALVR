@@ -93,14 +93,37 @@ class swapchain : public wsi::swapchain_base {
     void destroy_image(wsi::swapchain_image &image);
 
   private:
+    struct depth_proxy_image {
+        VkImage color_image{VK_NULL_HANDLE};
+        VkImage image{VK_NULL_HANDLE};
+        VkDeviceMemory memory{VK_NULL_HANDLE};
+        VkSemaphore semaphore{VK_NULL_HANDLE};
+        uint64_t semaphore_value{0};
+        VkCommandBuffer command_buffer{VK_NULL_HANDLE};
+        VkImageLayout layout{VK_IMAGE_LAYOUT_UNDEFINED};
+    };
+
+    bool create_depth_proxy(
+        const VkImageCreateInfo &image_create_info,
+        VkImage color_image,
+        VkFormat depth_format
+    );
+    bool copy_native_depth(uint32_t pending_index, uint64_t color_semaphore_value);
+    depth_proxy_image *find_depth_proxy(VkImage color_image);
+
     bool try_connect();
     int send_fds();
     int m_socket = -1;
     std::string m_socketPath;
     bool m_connected = false;
     std::vector<int> m_fds;
+    std::vector<int> m_depth_fds;
     VkImageCreateInfo m_create_info;
+    VkImageCreateInfo m_depth_create_info;
     size_t m_mem_index;
+    size_t m_depth_mem_index{0};
+    VkCommandPool m_depth_command_pool{VK_NULL_HANDLE};
+    std::vector<depth_proxy_image> m_depth_images;
     display &m_display;
     uint32_t in_flight_index = UINT32_MAX;
 };
