@@ -17,7 +17,7 @@ pub enum ReleaseFlavor {
 pub fn generate_licenses() -> String {
     let sh = Shell::new().unwrap();
 
-    cmd!(sh, "cargo install cargo-about --version 0.6.4")
+    cmd!(sh, "cargo install cargo-about --version 0.8.4 --locked")
         .run()
         .unwrap();
 
@@ -50,6 +50,13 @@ pub fn include_licenses(root_path: &Path, gpl: bool) {
             licenses_dir.join("FFmpeg.txt"),
         )
         .ok();
+    }
+    if cfg!(windows) {
+        sh.copy_file(
+            afs::deps_dir().join("windows/libvpl/alvr_build/share/vpl/licensing/license.txt"),
+            licenses_dir.join("libvpl.txt"),
+        )
+        .unwrap();
     }
 
     let licenses_content = generate_licenses();
